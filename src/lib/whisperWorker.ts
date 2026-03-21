@@ -1,4 +1,4 @@
-import { pipeline, env, read_audio } from '@huggingface/transformers';
+import { pipeline, env } from '@huggingface/transformers';
 
 // Disable local models to fetch from HF Hub
 env.allowLocalModels = false;
@@ -17,13 +17,10 @@ class PipelineSingleton {
   }
 }
 
-let fullAudioData: Float32Array | null = null;
-
-// Start model loading immediately on worker boot to save time
+// Model is shared across all chunk requests
 const modelPromise = PipelineSingleton.getInstance((x: any) => {
-  // Send model download/loading progress back to UI
   self.postMessage({ type: 'PROGRESS', payload: { 
-    message: x.status === 'progress' ? `Downloading AI Model: ${Math.round(x.progress)}%` : `Initializing AI engine: ${x.status}...`,
+    message: x.status === 'progress' ? `Downloading AI Model: ${Math.round(x.progress)}%` : `AI Engine: ${x.status}...`,
     detail: x
   }});
 });
@@ -32,54 +29,30 @@ self.onmessage = async (e: MessageEvent) => {
   const { type, payload } = e.data;
 
   if (type === 'PROCESS_CHUNK') {
-    const { chunkIndex, startTime, audioFile, chunkDuration } = payload;
+    const { chunkIndex, startTime, paddingTime, audioData, chunkDuration } = payload;
     
-    console.log(`[Whisper Worker] Received chunk request: ${chunkIndex}`);
+    console.log(`[Whisper Worker] Chunk ${chunkIndex}: Audio data received (${Math.round(audioData.length / 16000)}s length)`);
     
     try {
-      // 1. Ensure model is loading (it started on line 24)
+      // 1. Ensure model is ready
       const transcriber = await modelPromise;
 
-      // 2. Decode full audio if not already cached
-      if (!fullAudioData) {
-        self.postMessage({ type: 'PROGRESS', payload: { message: 'Decoding audio file (once)...' } });
-        console.log(`[Whisper Worker] Decoding full audio file...`);
-        // Transformers.js read_audio handles file -> Float32Array @ 16kHz
-        fullAudioData = await read_audio(audioFile, 16000);
-        console.log(`[Whisper Worker] Decoding complete. Buffer size: ${fullAudioData.length} samples`);
-      }
-
-      // 3. Extract specific segment
-      const sampleRate = 16000;
-      const startSample = Math.floor(startTime * sampleRate);
-      const endSample = Math.min(
-        fullAudioData.length,
-        Math.floor((startTime + chunkDuration) * sampleRate)
-      );
-
-      if (startSample >= fullAudioData.length) {
-        console.warn(`[Whisper Worker] Chunk ${chunkIndex} start sample exceeds audio length`);
-        return;
-      }
-
-      const chunkBuffer = fullAudioData.slice(startSample, endSample);
+      // 2. Transcribe
+      console.log(`[Whisper Worker] Transcribing chunk ${chunkIndex}...`);
+      self.postMessage({ type: 'PROGRESS', payload: { message: `Analyzing audio ${chunkIndex}...` } });
       
-      console.log(`[Whisper Worker] Running inference for chunk ${chunkIndex}`);
-      self.postMessage({ type: 'PROGRESS', payload: { message: `Transcribing segment ${chunkIndex}...` } });
-      
-      const output = await transcriber(chunkBuffer, {
+      const output = await transcriber(audioData, {
           chunk_length_s: 30,
           stride_length_s: 5,
           return_timestamps: 'word'
       });
       
-      console.log(`[Whisper Worker] Inference complete for chunk ${chunkIndex}`, output);
-      
-      // Map the output to match our `ChunkTranscript` interface
+      // 4. Map timestamps back to global time
+      // Subtract paddingTime (extra audio at start of slice) and add global startTime
       const words = output.chunks.map((chunk: any) => ({
         word: chunk.text.trim(),
-        start: startTime + chunk.timestamp[0],
-        end: startTime + chunk.timestamp[1]
+        start: startTime + (chunk.timestamp[0] - paddingTime),
+        end: startTime + (chunk.timestamp[1] - paddingTime)
       }));
 
       const result = {

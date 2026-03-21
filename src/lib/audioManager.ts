@@ -18,8 +18,15 @@ export class AudioManager {
         const { type, payload } = e.data;
         if (type === 'CHUNK_COMPLETE') {
           console.log('[AudioManager] Received transcript for chunk', payload.chunkIndex);
-          useAppStore.getState().addTranscript(payload.chunkIndex, payload);
+          const state = useAppStore.getState();
+          state.addTranscript(payload.chunkIndex, payload);
           this.processingChunks.delete(payload.chunkIndex);
+
+          // Force-check if we can stop buffering now that this chunk has arrived
+          const currentChunk = this.getChunkIndex(state.currentTime);
+          if (payload.chunkIndex === currentChunk && state.isChunkBuffering) {
+            state.setChunkBuffering(false);
+          }
         } else if (type === 'PROGRESS') {
           // Update the UI with detailed progress from the worker
           useAppStore.getState().setLoadingMessage(payload.message);
@@ -53,6 +60,24 @@ export class AudioManager {
     this.ensureChunkProcessed(nextChunkIndex);
   }
 
+  private static async decodeAudioSlice(blob: Blob): Promise<Float32Array> {
+    const arrayBuffer = await blob.arrayBuffer();
+    const audioCtx = new AudioContext({ sampleRate: 16000 });
+    const decodedBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    
+    if (decodedBuffer.sampleRate !== 16000) {
+      const offlineCtx = new OfflineAudioContext(1, decodedBuffer.duration * 16000, 16000);
+      const source = offlineCtx.createBufferSource();
+      source.buffer = decodedBuffer;
+      source.connect(offlineCtx.destination);
+      source.start();
+      const resampled = await offlineCtx.startRendering();
+      return resampled.getChannelData(0);
+    }
+    
+    return decodedBuffer.getChannelData(0);
+  }
+
   private static async ensureChunkProcessed(chunkIndex: number) {
     const state = useAppStore.getState();
     if (!state.currentBook || chunkIndex >= state.currentBook.chunks) return;
@@ -61,17 +86,45 @@ export class AudioManager {
 
     this.processingChunks.add(chunkIndex);
     const startTime = chunkIndex * this.CHUNK_DURATION;
+    const duration = state.currentBook.duration;
 
     if (this.worker && this.audioFile) {
-      this.worker.postMessage({
-        type: 'PROCESS_CHUNK',
-        payload: {
-          chunkIndex,
-          startTime,
-          audioFile: this.audioFile, // Send the whole file, worker will decode/cache
-          chunkDuration: this.CHUNK_DURATION
-        }
-      });
+      // PROPORTIONAL SLICING: Handle massive books by slicing the compressed file BEFORE decoding
+      // This is much more memory efficient than decoding the whole 30-hour MP3
+      const fileSize = this.audioFile.size;
+      const startByte = Math.floor((startTime / duration) * fileSize);
+      const endByte = Math.floor(((startTime + this.CHUNK_DURATION) / duration) * fileSize);
+      
+      // Add a small buffer (500KB) to ensure we don't cut off a frame header abruptly
+      const slicePadding = 500 * 1024;
+      const actualStartByte = Math.max(0, startByte - slicePadding);
+      const actualEndByte = Math.min(fileSize, endByte + slicePadding);
+      
+      const chunkBlob = this.audioFile.slice(actualStartByte, actualEndByte, this.audioFile.type);
+      
+      try {
+        useAppStore.getState().setLoadingMessage(`Decoding segment ${chunkIndex}...`);
+        const audioData = await this.decodeAudioSlice(chunkBlob);
+        
+        // Calculate how many seconds of "extra" audio we included at the start due to padding
+        const paddingBytes = startByte - actualStartByte;
+        const paddingTime = (paddingBytes / fileSize) * duration;
+
+        this.worker.postMessage({
+          type: 'PROCESS_CHUNK',
+          payload: {
+            chunkIndex,
+            startTime,
+            paddingTime, // Worker needs this to adjust timestamps
+            audioData, // Send decoded Float32Array instead of Blob
+            chunkDuration: this.CHUNK_DURATION
+          }
+        });
+      } catch (err) {
+        useAppStore.getState().setLoadingMessage(`Error decoding segment ${chunkIndex}`);
+        console.error('[AudioManager] Failed to decode audio slice on main thread:', err);
+        this.processingChunks.delete(chunkIndex);
+      }
     } else {
       this.processingChunks.delete(chunkIndex);
     }
