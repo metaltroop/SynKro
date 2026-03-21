@@ -8,7 +8,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 export class AudioManager {
   private static worker: Worker | null = null;
   private static processingChunks = new Set<number>();
-  private static CHUNK_DURATION = 180; // 3-minute chunks
+  public static CHUNK_DURATION = 180; // 3-minute chunks
   private static audioFile: File | null = null;
 
   static initialize() {

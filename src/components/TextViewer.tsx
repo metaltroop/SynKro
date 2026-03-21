@@ -1,12 +1,13 @@
 import React, { useMemo, useRef, useEffect } from 'react';
 import { useAppStore } from '../store/useAppStore';
+import { AudioManager } from '../lib/audioManager';
 
 export const TextViewer: React.FC = () => {
   const { currentBook, transcripts, currentTime, loadingMessage } = useAppStore();
   const activeWordRef = useRef<HTMLSpanElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const currentChunkIndex = Math.floor(currentTime / 60);
+  const currentChunkIndex = Math.floor(currentTime / AudioManager.CHUNK_DURATION);
   const currentTranscript = transcripts[currentChunkIndex];
   
   // Memoize words for potential manual alignment fallback
@@ -57,12 +58,31 @@ export const TextViewer: React.FC = () => {
               })}
             </div>
         ) : (
-            <div className="flex flex-col items-center justify-center p-12 text-zinc-500 min-h-[400px]">
-              <div className="h-10 w-10 border-4 border-zinc-700 border-t-purple-500 rounded-full animate-spin mb-6" />
-              <p className="text-white font-medium text-lg text-center">{loadingMessage || 'Initializing AI Engine...'}</p>
-              <p className="text-sm mt-2 opacity-50 max-w-xs text-center">
-                This process runs entirely on your browser. Please stay on this tab while the first segment is alignment.
-              </p>
+            <div className="relative flex flex-col items-center justify-center min-h-[400px] overflow-hidden rounded-xl">
+              {/* Glassmorphism Loading Overlay */}
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/40 backdrop-blur-md rounded-xl border border-white/5 shadow-2xl transition-all duration-500">
+                <div className="h-12 w-12 border-4 border-zinc-800 border-t-purple-500 rounded-full animate-spin mb-6 shadow-[0_0_20px_rgba(168,85,247,0.4)]" />
+                <p className="text-white font-medium text-lg text-center tracking-wide">{loadingMessage || 'Decoding Segment...'}</p>
+                <div className="mt-4 flex gap-1">
+                  <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                </div>
+              </div>
+
+              {/* Skeleton Text Background */}
+              <div className="absolute inset-0 p-8 flex flex-wrap gap-x-3 gap-y-4 opacity-30 select-none pointer-events-none content-start">
+                {Array.from({ length: 150 }).map((_, i) => (
+                  <div 
+                    key={i} 
+                    className="h-5 bg-zinc-700/50 rounded animate-pulse" 
+                    style={{ 
+                      width: `${Math.floor(Math.random() * 60) + 30}px`,
+                      animationDelay: `${Math.random() * 2}s`
+                    }} 
+                  />
+                ))}
+              </div>
             </div>
         )}
 

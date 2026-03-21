@@ -6,6 +6,7 @@ import { Play, Pause, Rewind, FastForward } from 'lucide-react';
 export const AudioPlayer: React.FC = () => {
   const { currentBook, isPlaying, isChunkBuffering, currentTime, setIsPlaying, setCurrentTime } = useAppStore();
   const audioRef = useRef<HTMLAudioElement>(null);
+  const isSeekingRef = useRef<boolean>(false);
 
   useEffect(() => {
     AudioManager.initialize();
@@ -21,18 +22,28 @@ export const AudioPlayer: React.FC = () => {
     }
   }, [isPlaying, isChunkBuffering, currentBook]);
 
+  // Handle external seek requests (e.g. clicking text or progress bar jump)
   useEffect(() => {
-    if (audioRef.current && Math.abs(audioRef.current.currentTime - currentTime) > 0.5) {
-      audioRef.current.currentTime = currentTime;
+    if (audioRef.current) {
+      const diff = Math.abs(audioRef.current.currentTime - currentTime);
+      // Only force the audio element to jump if it drifted highly (user clicked a specific word)
+      if (diff > 0.5) {
+        isSeekingRef.current = true;
+        audioRef.current.currentTime = currentTime;
+      }
     }
   }, [currentTime]);
 
   const handleTimeUpdate = () => {
-    if (audioRef.current) {
+    if (audioRef.current && !isSeekingRef.current) {
       const time = audioRef.current.currentTime;
       setCurrentTime(time);
       AudioManager.onTimeUpdate(time);
     }
+  };
+
+  const handleSeeked = () => {
+    isSeekingRef.current = false;
   };
 
   const togglePlay = () => setIsPlaying(!isPlaying);
@@ -50,6 +61,7 @@ export const AudioPlayer: React.FC = () => {
           ref={audioRef}
           src={currentBook.audioUrl as string}
           onTimeUpdate={handleTimeUpdate}
+          onSeeked={handleSeeked}
           onEnded={() => setIsPlaying(false)}
           className="hidden"
         />
