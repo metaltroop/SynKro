@@ -7,7 +7,7 @@ function App() {
   const { currentBook } = useAppStore();
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-slate-200 font-sans selection:bg-purple-500/30 flex flex-col">
+    <div className="h-screen max-h-screen overflow-hidden bg-zinc-950 text-slate-200 font-sans selection:bg-purple-500/30 flex flex-col">
       {!currentBook ? (
         <FileUploader />
       ) : (
