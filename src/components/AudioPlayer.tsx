@@ -81,7 +81,31 @@ export const AudioPlayer: React.FC = () => {
     }
   }, [currentTime]);
 
-  // ── Time update ───────────────────────────────────────────────────────────
+  // ── High-precision 60fps time tracking ───────────────────────────────────
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || !isPlaying || isChunkBuffering) return;
+
+    let animId: number;
+    let lastTime = -1;
+
+    const tick = () => {
+      if (el && !isSeekingRef.current && !el.paused) {
+        const t = el.currentTime;
+        if (Math.abs(t - lastTime) >= 0.025) {
+          lastTime = t;
+          setCurrentTime(t);
+          AudioManager.onTimeUpdate(t);
+        }
+      }
+      animId = requestAnimationFrame(tick);
+    };
+
+    animId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animId);
+  }, [isPlaying, isChunkBuffering, setCurrentTime]);
+
+  // Fallback / standard time update
   const handleTimeUpdate = useCallback(() => {
     const el = audioRef.current;
     if (!el || isSeekingRef.current) return;

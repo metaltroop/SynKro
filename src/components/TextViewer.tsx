@@ -266,36 +266,40 @@ export const TextViewer: React.FC = () => {
     if (renderableWords.length === 0) return { activeWordIndex: -1, passedWordIndex: -1 };
 
     const currentChunk = Math.floor(currentTime / AudioManager.CHUNK_DURATION);
+    // Acoustic lead compensation: human speech perception anticipates words slightly ahead,
+    // and Whisper token boundaries naturally follow ~150-180ms behind the acoustic onset of the word.
+    const effectiveTime = currentTime + 0.16;
+
     let active = -1;
     let passed = -1;
     let bestScore = Infinity;
 
     for (const w of renderableWords) {
       if (w.start !== undefined && w.end !== undefined) {
-        if (currentTime >= w.start && currentTime <= w.end) {
+        if (effectiveTime >= w.start && effectiveTime <= w.end) {
           // Strictly prioritize words from the currentChunk/paragraph to eliminate any highlight juggling
           const chunkDiff = Math.abs(w.paragraphIndex - currentChunk);
           const center = (w.start + w.end) / 2;
-          const score = chunkDiff * 1000 + Math.abs(currentTime - center);
+          const score = chunkDiff * 1000 + Math.abs(effectiveTime - center);
           if (score < bestScore) {
             bestScore = score;
             active = w.index;
           }
         }
-        if (currentTime > w.end) {
+        if (effectiveTime > w.end) {
           passed = w.index;
         }
       }
     }
 
     // Natural inter-word pause smoothing:
-    // If between words during a brief speech pause (<= 0.6s), maintain highlight on the last spoken word
+    // If between words during a brief speech pause (<= 0.4s), maintain highlight on the last spoken word
     if (active === -1 && passed !== -1) {
       const lastPassedWord = renderableWords.find((w) => w.index === passed);
       if (
         lastPassedWord &&
         lastPassedWord.end !== undefined &&
-        currentTime - lastPassedWord.end <= 0.6
+        effectiveTime - lastPassedWord.end <= 0.4
       ) {
         active = passed;
       }
