@@ -43,9 +43,22 @@ export class AudioManager {
     this.engine?.onTimeUpdate(currentTime);
   }
 
-  static async loadBook(audioFile: File, textFile: File): Promise<void> {
+  static async loadBook(
+    audioFile: File,
+    textFile: File,
+    initialManifest?: import('../types').SynkroManifest | null,
+    dirHandle?: FileSystemDirectoryHandle | null,
+  ): Promise<void> {
     await this.initialize();
-    await this.engine!.loadBook(audioFile, textFile);
+    await this.engine!.loadBook(audioFile, textFile, initialManifest, dirHandle);
+  }
+
+  static startFullTranscription(): void {
+    this.engine?.startFullTranscription?.();
+  }
+
+  static stopFullTranscription(): void {
+    this.engine?.stopFullTranscription?.();
   }
 
   static dispose(): void {

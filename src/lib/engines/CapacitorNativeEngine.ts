@@ -8,7 +8,7 @@
  * On native platforms this replaces WebMediaEngine entirely — no WASM, no Web Audio API.
  */
 
-import type { IMediaEngine } from '../../types';
+import type { IMediaEngine, SynkroManifest } from '../../types';
 import { useAppStore } from '../../store/useAppStore';
 import { NativeMediaProcessor } from '../../plugins/CapacitorMediaPlugin';
 import {
@@ -95,7 +95,12 @@ export class CapacitorNativeEngine implements IMediaEngine {
     }
   }
 
-  async loadBook(audioFile: File, textFile: File): Promise<void> {
+  async loadBook(
+    audioFile: File,
+    textFile: File,
+    _initialManifest?: SynkroManifest | null,
+    _dirHandle?: FileSystemDirectoryHandle | null,
+  ): Promise<void> {
     const state = useAppStore.getState();
     state.setLoadingMessage('Native: loading book…');
 

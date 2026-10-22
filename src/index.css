@@ -2,6 +2,54 @@
 
 @layer base {
   body {
-    @apply bg-zinc-950 text-slate-200 antialiased;
+    @apply bg-zinc-950 text-slate-200 antialiased selection:bg-purple-500/30 selection:text-purple-100;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
+}
+
+/* ── Custom Sleek Scrollbar ──────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(9, 9, 11, 0.8);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(168, 85, 247, 0.35);
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  background-clip: content-box;
+  transition: background-color 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(168, 85, 247, 0.7);
+  background-clip: content-box;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(168, 85, 247, 0.35) rgba(9, 9, 11, 0.8);
+}
+
+/* ── Interactive Text & Word Hover ────────────────────────────────────────── */
+.word-interactive {
+  cursor: pointer;
+  position: relative;
+  transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.word-interactive:hover {
+  background-color: rgba(168, 85, 247, 0.28);
+  color: #faf5ff !important;
+  border-radius: 3px;
+  box-shadow: 0 0 12px rgba(168, 85, 247, 0.45);
+}
+
+/* ── Paginated Book View Styles ──────────────────────────────────────────── */
+.book-paper-shadow {
+  box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.07);
 }

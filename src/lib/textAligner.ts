@@ -97,25 +97,27 @@ function similarity(a: string, b: string): number {
 
 /**
  * Find the index in `bookWords` where a Whisper sequence of length `whisperLen`
- * best aligns, starting from `searchStart` (the tail of the previous chunk).
+ * best aligns, centered around `searchAnchor`.
  *
- * Strategy: score candidate offsets using the first and last Whisper anchor
- * words + average similarity across the overlapping window.
+ * Supports ±1500 words search window for out-of-order seeking, or up to 5000 words
+ * for initial/early chunks to skip past publisher praise, copyright, and dedication pages.
  */
 function findBestOffset(
   bookWords: BookWord[],
   whisperNorm: string[],
-  searchStart: number,
+  searchAnchor: number,
+  isEarlyChunk = false,
 ): { bestOffset: number; bestScore: number } {
   const wLen = whisperNorm.length;
-  if (wLen === 0 || searchStart >= bookWords.length) return { bestOffset: searchStart, bestScore: 0 };
+  if (wLen === 0 || bookWords.length === 0) return { bestOffset: 0, bestScore: 0 };
 
-  // For initial chunks near the start of the book, allow searching up to 5000 words
-  // into the text to skip past reviews, publisher praise, copyright, and dedication pages.
-  const maxLookahead = searchStart === 0 ? Math.min(5000, bookWords.length) : Math.max(wLen * 3, 200);
-  const searchEnd = Math.min(
-    bookWords.length - Math.floor(wLen * 0.5),
-    searchStart + maxLookahead,
+  const searchStart = isEarlyChunk ? 0 : Math.max(0, searchAnchor - 1500);
+  const maxLookahead = isEarlyChunk
+    ? Math.min(5000, bookWords.length)
+    : Math.min(bookWords.length, searchAnchor + 1500);
+  const searchEnd = Math.max(
+    searchStart,
+    Math.min(bookWords.length - Math.floor(wLen * 0.5), maxLookahead),
   );
 
   let bestScore = -1;
@@ -167,14 +169,14 @@ function interpolateRange(
 // ─── Main alignment entry point ───────────────────────────────────────────────
 
 /**
- * Persistent cursor: index of the first un-aligned BookWord.
- * Preserved across chunk calls so each chunk picks up where the last left off.
+ * Chunk-aware cursor map: maps chunkIndex -> lastAssignedWordIndex in bookWords.
+ * Ensures out-of-order scrubbing/seeking preserves stable alignments!
  */
-let _bookCursor = 0;
+const _chunkCursorMap = new Map<number, number>();
 
-/** Reset the cursor (call when a new book is loaded). */
+/** Reset the alignment cursor map (call when a new book is loaded). */
 export function resetAlignmentCursor(): void {
-  _bookCursor = 0;
+  _chunkCursorMap.clear();
 }
 
 /**
@@ -190,6 +192,7 @@ export function alignChunk(
   chunkIndex: number,
   chunkStartTime: number,
   chunkEndTime: number,
+  totalChunks = 1,
 ): AlignedChunk {
   if (whisperWords.length === 0) {
     return {
@@ -202,8 +205,27 @@ export function alignChunk(
 
   const whisperNorm = whisperWords.map((w) => normalizeWord(w.word));
 
+  // Determine search anchor:
+  let searchAnchor = 0;
+  let isEarlyChunk = false;
+
+  if (_chunkCursorMap.has(chunkIndex - 1)) {
+    searchAnchor = _chunkCursorMap.get(chunkIndex - 1)! + 1;
+  } else if (chunkIndex === 0 || chunkIndex === 1) {
+    searchAnchor = 0;
+    isEarlyChunk = true;
+  } else {
+    // Proportional estimate when user scrubbed/sought out of order
+    searchAnchor = Math.floor((chunkIndex / Math.max(1, totalChunks)) * bookWords.length);
+  }
+
   // Find best offset in bookWords for this chunk
-  const { bestOffset: offset, bestScore } = findBestOffset(bookWords, whisperNorm, _bookCursor);
+  const { bestOffset: offset, bestScore } = findBestOffset(
+    bookWords,
+    whisperNorm,
+    searchAnchor,
+    isEarlyChunk,
+  );
 
   // If match score is below strict threshold (audio preamble or mismatched book),
   // DO NOT force-match onto arbitrary book text! Return Whisper's direct transcript words.
@@ -274,8 +296,8 @@ export function alignChunk(
     for (let i = offset; i <= lastAssignedBIdx; i++) {
       chunkBookWords.push(bookWords[i]);
     }
-    // Advance global cursor cleanly to the next word
-    _bookCursor = lastAssignedBIdx + 1;
+    // Remember assigned cursor for this chunk
+    _chunkCursorMap.set(chunkIndex, lastAssignedBIdx);
 
     return {
       chunkIndex,

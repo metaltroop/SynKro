@@ -12,7 +12,8 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { AudioManager } from '../lib/audioManager';
-import { Play, Pause, Rewind, FastForward, Library, Gauge } from 'lucide-react';
+import { Storage } from '../lib/storage';
+import { Play, Pause, Rewind, FastForward, Library, Gauge, Sliders } from 'lucide-react';
 import type { StorageMode } from '../types';
 
 const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2] as const;
@@ -38,10 +39,14 @@ export const AudioPlayer: React.FC = () => {
     currentTime,
     playbackRate,
     storageMode,
+    transcripts,
+    alignedChunks,
+    syncOffsetMs,
     setIsPlaying,
     setCurrentTime,
     setPlaybackRate,
     setStorageMode,
+    setSyncOffsetMs,
     resetBook,
   } = useAppStore();
 
@@ -49,6 +54,7 @@ export const AudioPlayer: React.FC = () => {
   const scrubberRef = useRef<HTMLDivElement>(null);
   const isSeekingRef = useRef(false);
   const [showStorageMenu, setShowStorageMenu] = useState(false);
+  const [showSyncPopover, setShowSyncPopover] = useState(false);
 
   // ── Engine initialisation ──────────────────────────────────────────────────
   useEffect(() => {
@@ -156,6 +162,7 @@ export const AudioPlayer: React.FC = () => {
       audioRef.current.pause();
     }
     setIsPlaying(false);
+    Storage.clearLastActiveBookId();
     AudioManager.dispose();
     resetBook();
   }, [setIsPlaying, resetBook]);
@@ -167,7 +174,7 @@ export const AudioPlayer: React.FC = () => {
     : 0;
 
   return (
-    <div className="fixed bottom-0 left-0 right-0 z-50 bg-zinc-900/95 backdrop-blur-md border-t border-zinc-800 pb-safe shadow-2xl">
+    <div className="fixed bottom-0 left-0 right-0 z-50 bg-zinc-950/90 backdrop-blur-xl border-t border-zinc-800/80 pb-safe shadow-2xl">
       <div className="max-w-4xl mx-auto px-4 pt-3 pb-4 flex flex-col gap-2">
         {/* Hidden audio element */}
         <audio
@@ -223,6 +230,26 @@ export const AudioPlayer: React.FC = () => {
             )}
           </div>
         </div>
+
+        {/* Segmented Timeline Pre-Transcription Bar ("Shader Compilation") */}
+        {currentBook.chunks > 0 && (
+          <div
+            className="flex h-1.5 w-full bg-zinc-800/80 rounded-full overflow-hidden gap-[1px]"
+            title="Full Book Compilation Timeline: Purple = Pre-transcribed, Dark = Pending"
+          >
+            {Array.from({ length: currentBook.chunks }).map((_, i) => {
+              const isCompiled = !!(transcripts[i] || alignedChunks[i]);
+              return (
+                <div
+                  key={i}
+                  className={`flex-1 h-full transition-colors ${
+                    isCompiled ? 'bg-purple-500' : 'bg-zinc-800'
+                  }`}
+                />
+              );
+            })}
+          </div>
+        )}
 
         {/* Progress scrubber */}
         <div className="flex items-center gap-3 text-xs text-zinc-400">
@@ -292,6 +319,73 @@ export const AudioPlayer: React.FC = () => {
             <Gauge size={16} />
             {playbackRate}×
           </button>
+
+          {/* Live Audio-Text Sync Offset Slider Popover */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowSyncPopover((v) => !v)}
+              title="Adjust audio-text timing sync"
+              className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg border transition-all cursor-pointer font-mono ${
+                syncOffsetMs !== 0
+                  ? 'bg-purple-950/60 border-purple-500/50 text-purple-300'
+                  : 'bg-zinc-800/80 border-zinc-700/60 text-zinc-400 hover:text-white'
+              }`}
+            >
+              <Sliders size={14} />
+              <span>{syncOffsetMs > 0 ? `+${syncOffsetMs}` : `${syncOffsetMs}`}ms</span>
+            </button>
+
+            {showSyncPopover && (
+              <div className="absolute bottom-full right-0 mb-3 w-64 p-3.5 bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl z-50 flex flex-col gap-2.5">
+                <div className="flex items-center justify-between text-xs text-zinc-300 font-semibold">
+                  <span>Audio Sync Offset</span>
+                  <span className="font-mono text-purple-400">
+                    {syncOffsetMs > 0 ? `+${syncOffsetMs}` : `${syncOffsetMs}`}ms
+                  </span>
+                </div>
+
+                <input
+                  type="range"
+                  min={-2000}
+                  max={2000}
+                  step={50}
+                  value={syncOffsetMs}
+                  onChange={(e) => setSyncOffsetMs(parseInt(e.target.value, 10))}
+                  className="w-full accent-purple-500 h-1.5 bg-zinc-700 rounded-lg cursor-pointer"
+                />
+
+                <div className="flex justify-between text-[10px] text-zinc-500">
+                  <span>Text leads (-2s)</span>
+                  <span>Audio leads (+2s)</span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-1 pt-1 border-t border-zinc-800 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => setSyncOffsetMs(syncOffsetMs - 100)}
+                    className="py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 cursor-pointer"
+                  >
+                    -100ms
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSyncOffsetMs(0)}
+                    className="py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-medium cursor-pointer"
+                  >
+                    Reset (0)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSyncOffsetMs(syncOffsetMs + 100)}
+                    className="py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 cursor-pointer"
+                  >
+                    +100ms
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

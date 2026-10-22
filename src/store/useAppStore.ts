@@ -13,6 +13,11 @@ interface AppState {
   storageMode: StorageMode;
   isChunkBuffering: boolean;
   loadingMessage: string;
+  isFullTranscribing: boolean;
+  fullTranscribeETA: string | null;
+  syncOffsetMs: number;
+  readingViewMode: 'scroll' | 'book';
+  currentPageIndex: number;
 
   // ── Actions ────────────────────────────────────────────────────────────────
   setBook: (book: Book) => void;
@@ -22,6 +27,11 @@ interface AppState {
   setLoadingMessage: (msg: string) => void;
   setPlaybackRate: (rate: number) => void;
   setStorageMode: (mode: StorageMode) => void;
+  setFullTranscribing: (val: boolean) => void;
+  setFullTranscribeETA: (eta: string | null) => void;
+  setSyncOffsetMs: (ms: number) => void;
+  setReadingViewMode: (mode: 'scroll' | 'book') => void;
+  setCurrentPageIndex: (page: number) => void;
   /**
    * Stores both the raw transcript and the aligned chunk together.
    * Called by engines after alignment completes.
@@ -49,6 +59,11 @@ export const useAppStore = create<AppState>((set) => ({
   storageMode: 'SMART',
   isChunkBuffering: false,
   loadingMessage: '',
+  isFullTranscribing: false,
+  fullTranscribeETA: null,
+  syncOffsetMs: 0,
+  readingViewMode: 'scroll',
+  currentPageIndex: 0,
 
   setBook: (book) =>
     set({
@@ -58,6 +73,11 @@ export const useAppStore = create<AppState>((set) => ({
       currentTime: 0,
       isPlaying: false,
       isChunkBuffering: false,
+      isFullTranscribing: false,
+      fullTranscribeETA: null,
+      syncOffsetMs: 0,
+      readingViewMode: 'scroll',
+      currentPageIndex: 0,
     }),
 
   setCurrentTime: (time) => set({ currentTime: time }),
@@ -66,6 +86,11 @@ export const useAppStore = create<AppState>((set) => ({
   setLoadingMessage: (msg) => set({ loadingMessage: msg }),
   setPlaybackRate: (rate) => set({ playbackRate: rate }),
   setStorageMode: (mode) => set({ storageMode: mode }),
+  setFullTranscribing: (val) => set({ isFullTranscribing: val }),
+  setFullTranscribeETA: (eta) => set({ fullTranscribeETA: eta }),
+  setSyncOffsetMs: (ms) => set({ syncOffsetMs: ms }),
+  setReadingViewMode: (mode) => set({ readingViewMode: mode }),
+  setCurrentPageIndex: (page) => set({ currentPageIndex: page }),
 
   addAlignedChunk: (chunkIndex, transcript, aligned) =>
     set((state) => ({
@@ -98,5 +123,10 @@ export const useAppStore = create<AppState>((set) => ({
       isPlaying: false,
       isChunkBuffering: false,
       loadingMessage: '',
+      isFullTranscribing: false,
+      fullTranscribeETA: null,
+      syncOffsetMs: 0,
+      readingViewMode: 'scroll',
+      currentPageIndex: 0,
     }),
 }));

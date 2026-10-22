@@ -11,11 +11,12 @@
  *   await Storage.evictChunks(bookId, keepIndices)
  */
 
-import type { ChunkTranscript, StorageMode } from '../types';
+import type { ChunkTranscript, StorageMode, BookMetadata } from '../types';
 
 const DB_NAME = 'synkro_v3';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_TRANSCRIPTS = 'transcripts';
+const STORE_BOOKS_META = 'books_meta';
 
 // ─── Internal DB lifecycle ────────────────────────────────────────────────────
 
@@ -38,6 +39,9 @@ function openDB(): Promise<IDBDatabase> {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE_TRANSCRIPTS)) {
         db.createObjectStore(STORE_TRANSCRIPTS); // key = `${bookId}::${chunkIndex}`
+      }
+      if (!db.objectStoreNames.contains(STORE_BOOKS_META)) {
+        db.createObjectStore(STORE_BOOKS_META, { keyPath: 'id' });
       }
     };
     req.onsuccess = () => {
@@ -185,5 +189,172 @@ export const Storage = {
       }
     }
     return keep;
+  },
+
+  // ─── v2 Book Metadata & Resume Hub ─────────────────────────────────────────
+
+  async saveBookMeta(meta: BookMetadata): Promise<void> {
+    try {
+      const db = await openDB();
+      await promisifyRequest(
+        txn(db, STORE_BOOKS_META, 'readwrite').put(meta),
+      );
+    } catch (err) {
+      console.warn('[Storage] saveBookMeta failed:', err);
+    }
+  },
+
+  async getBookMeta(id: string): Promise<BookMetadata | null> {
+    try {
+      const db = await openDB();
+      const res = await promisifyRequest<BookMetadata | undefined>(
+        txn(db, STORE_BOOKS_META, 'readonly').get(id),
+      );
+      return res ?? null;
+    } catch {
+      return null;
+    }
+  },
+
+  async getAllBooksMeta(): Promise<BookMetadata[]> {
+    try {
+      const db = await openDB();
+      const res = await promisifyRequest<BookMetadata[]>(
+        txn(db, STORE_BOOKS_META, 'readonly').getAll(),
+      );
+      return res || [];
+    } catch {
+      return [];
+    }
+  },
+
+  async deleteBookMeta(id: string): Promise<void> {
+    try {
+      const db = await openDB();
+      await promisifyRequest(
+        txn(db, STORE_BOOKS_META, 'readwrite').delete(id),
+      );
+    } catch (err) {
+      console.warn('[Storage] deleteBookMeta failed:', err);
+    }
+  },
+
+  // ─── Root Library Folder Storage ──────────────────────────────────────────
+
+  async saveRootFolderHandle(handle: FileSystemDirectoryHandle): Promise<void> {
+    try {
+      const db = await openDB();
+      await promisifyRequest(
+        txn(db, STORE_BOOKS_META, 'readwrite').put({
+          id: '__synkro_root_library__',
+          title: 'SynKro Root Library',
+          duration: 0,
+          totalChunks: 0,
+          compiledChunks: 0,
+          lastPlayedTime: 0,
+          updatedAt: new Date().toISOString(),
+          dirHandle: handle,
+        } as BookMetadata),
+      );
+    } catch (err) {
+      console.warn('[Storage] saveRootFolderHandle failed:', err);
+    }
+  },
+
+  async getRootFolderHandle(): Promise<FileSystemDirectoryHandle | null> {
+    try {
+      const db = await openDB();
+      const res = await promisifyRequest<BookMetadata | undefined>(
+        txn(db, STORE_BOOKS_META, 'readonly').get('__synkro_root_library__'),
+      );
+      return res?.dirHandle ?? null;
+    } catch {
+      return null;
+    }
+  },
+
+  async clearRootFolderHandle(): Promise<void> {
+    try {
+      const db = await openDB();
+      await promisifyRequest(
+        txn(db, STORE_BOOKS_META, 'readwrite').delete('__synkro_root_library__'),
+      );
+    } catch (err) {
+      console.warn('[Storage] clearRootFolderHandle failed:', err);
+    }
+  },
+
+  // ─── Last Active Book Session ─────────────────────────────────────────────
+
+  getLastActiveBookId(): string | null {
+    try {
+      return localStorage.getItem('synkro_last_active_book');
+    } catch {
+      return null;
+    }
+  },
+
+  setLastActiveBookId(bookId: string): void {
+    try {
+      localStorage.setItem('synkro_last_active_book', bookId);
+    } catch (err) {
+      console.warn('[Storage] setLastActiveBookId failed:', err);
+    }
+  },
+
+  clearLastActiveBookId(): void {
+    try {
+      localStorage.removeItem('synkro_last_active_book');
+    } catch {
+      // ignore
+    }
+  },
+
+  /** Retrieve all cached transcripts for a book (used when generating portable synkro-manifest.json). */
+  async getAllTranscripts(bookId: string): Promise<Record<number, ChunkTranscript>> {
+    const result: Record<number, ChunkTranscript> = {};
+    try {
+      const db = await openDB();
+      const store = db.transaction(STORE_TRANSCRIPTS, 'readonly').objectStore(STORE_TRANSCRIPTS);
+      await new Promise<void>((resolve, reject) => {
+        const req = store.openCursor();
+        req.onsuccess = () => {
+          const cursor = req.result;
+          if (!cursor) { resolve(); return; }
+          const key = cursor.key as string;
+          if (key.startsWith(`${bookId}::`)) {
+            const idx = parseInt(key.split('::')[1], 10);
+            result[idx] = cursor.value as ChunkTranscript;
+          }
+          cursor.continue();
+        };
+        req.onerror = () => reject(req.error);
+      });
+    } catch (err) {
+      console.warn('[Storage] getAllTranscripts failed:', err);
+    }
+    return result;
+  },
+
+  /** Bulk persist transcripts (used when importing an existing SynKro folder). */
+  async putAllTranscripts(
+    bookId: string,
+    transcripts: Record<number, ChunkTranscript>,
+  ): Promise<void> {
+    try {
+      const db = await openDB();
+      const tx = db.transaction(STORE_TRANSCRIPTS, 'readwrite');
+      const store = tx.objectStore(STORE_TRANSCRIPTS);
+      for (const [idxStr, tr] of Object.entries(transcripts)) {
+        store.put(tr, transcriptKey(bookId, parseInt(idxStr, 10)));
+      }
+      await new Promise<void>((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    } catch (err) {
+      console.warn('[Storage] putAllTranscripts failed:', err);
+    }
   },
 };

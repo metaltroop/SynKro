@@ -11,7 +11,7 @@
  *  • Accurate paddingTime clamping
  */
 
-import type { IMediaEngine, ChunkTranscript, AlignedChunk } from '../../types';
+import type { IMediaEngine, ChunkTranscript, AlignedChunk, SynkroManifest, Book } from '../../types';
 import { useAppStore } from '../../store/useAppStore';
 import { Storage } from '../storage';
 import {
@@ -19,6 +19,13 @@ import {
   alignChunk,
   resetAlignmentCursor,
 } from '../textAligner';
+import {
+  scheduleManifestAutoSave,
+  saveManifestToFolder,
+  isDesktopOrLaptop,
+  generatePdfCover,
+  makeBookId,
+} from '../folderManager';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
@@ -37,13 +44,6 @@ function getSharedAudioCtx(): AudioContext {
   return _sharedAudioCtx;
 }
 
-// ─── Book ID hash ─────────────────────────────────────────────────────────────
-
-function makeBookId(audio: File, text: File): string {
-  return `${audio.name}_${audio.size}_${text.name}_${text.size}`
-    .replace(/[^a-zA-Z0-9_]/g, '_');
-}
-
 // ─── WebMediaEngine ───────────────────────────────────────────────────────────
 
 export class WebMediaEngine implements IMediaEngine {
@@ -55,6 +55,8 @@ export class WebMediaEngine implements IMediaEngine {
   private audioStartOffset = 0;
   private detectedBitrate = 128;
   private detectedSampleRate = 44100;
+  private chunkStartTimes = new Map<number, number>();
+  private recentChunkDurations: number[] = [];
 
   public readonly CHUNK_DURATION = 30; // seconds — Whisper's native 30s window
 
@@ -96,34 +98,193 @@ export class WebMediaEngine implements IMediaEngine {
     const book = state.currentBook;
     this.processingChunks.delete(raw.chunkIndex);
 
+    // Track execution duration for ETA computation
+    const startTime = this.chunkStartTimes.get(raw.chunkIndex);
+    if (startTime) {
+      const duration = (performance.now() - startTime) / 1000;
+      this.recentChunkDurations.push(duration);
+      if (this.recentChunkDurations.length > 5) this.recentChunkDurations.shift();
+      this.chunkStartTimes.delete(raw.chunkIndex);
+    }
+
     // Persist to IndexedDB
     if (book) {
       void Storage.putTranscript(book.id, raw.chunkIndex, raw);
 
-      // Run text alignment
+      // Run text alignment with totalChunks passed
       const aligned: AlignedChunk = alignChunk(
         book.bookWords,
         raw.words,
         raw.chunkIndex,
         raw.startTime,
         raw.endTime,
+        book.chunks,
       );
       state.addAlignedChunk(raw.chunkIndex, raw, aligned);
 
-      // Evict per StorageMode
+      // Evict per StorageMode: KEEP_ALL and SMART never delete from IndexedDB!
       const mode = state.storageMode;
       const currentChunk = this.getChunkIndex(state.currentTime);
       const keep = Storage.keepWindowIndices(currentChunk, book.chunks, mode);
-      void Storage.evictChunks(book.id, keep);
+      if (mode === 'LITE_MODE') {
+        void Storage.evictChunks(book.id, keep);
+        state.evictInMemory(keep);
+      } else if (mode === 'SMART') {
+        state.evictInMemory(keep);
+      }
+
+      // Update book metadata in IndexedDB for Library Resume Hub
+      void Storage.saveBookMeta({
+        id: book.id,
+        title: book.title,
+        duration: book.duration,
+        totalChunks: book.chunks,
+        compiledChunks: Object.keys(useAppStore.getState().transcripts).length,
+        lastPlayedTime: state.currentTime,
+        updatedAt: new Date().toISOString(),
+        audioFileName: book.audioFileName,
+        textFileName: book.textFileName,
+        syncOffsetMs: state.syncOffsetMs,
+        playbackRate: state.playbackRate,
+        dirHandle: book.dirHandle,
+        coverUrl: book.coverUrl,
+        isCompileFullEnabled: state.isFullTranscribing,
+      });
+
+      // Live auto-save synkro-manifest.json to user's disk folder if folder handle is attached
+      if (book.dirHandle) {
+        scheduleManifestAutoSave(book.dirHandle, () => this._buildManifest(book, useAppStore.getState()));
+      }
 
       // Clear buffering flag if this is the needed chunk
       if (raw.chunkIndex === currentChunk && state.isChunkBuffering) {
         state.setChunkBuffering(false);
       }
 
-      // Pre-buffer lookahead: proactively keep next chunks queued in the worker
-      void this.ensureChunkProcessed(raw.chunkIndex + 1);
-      void this.ensureChunkProcessed(raw.chunkIndex + 2);
+      // Continuous compilation or pre-buffer lookahead
+      if (state.isFullTranscribing) {
+        this._feedNextCompilationChunk();
+      } else {
+        // Pre-buffer lookahead: proactively keep next chunks queued in the worker
+        void this.ensureChunkProcessed(raw.chunkIndex + 1);
+        void this.ensureChunkProcessed(raw.chunkIndex + 2);
+      }
+    }
+  }
+
+  private _buildManifest(book: Book, state: ReturnType<typeof useAppStore.getState>): SynkroManifest {
+    return {
+      version: 2,
+      bookId: book.id,
+      title: book.title,
+      audioFileName: book.audioFileName ?? `${book.title}.mp3`,
+      textFileName: book.textFileName ?? `${book.title}.pdf`,
+      duration: book.duration,
+      chunkDuration: this.CHUNK_DURATION,
+      totalChunks: book.chunks,
+      syncOffsetMs: state.syncOffsetMs,
+      playbackRate: state.playbackRate,
+      lastPlayedTime: state.currentTime,
+      updatedAt: new Date().toISOString(),
+      coverUrl: book.coverUrl,
+      isCompileFullEnabled: state.isFullTranscribing,
+      transcripts: state.transcripts,
+    };
+  }
+
+  startFullTranscription(): void {
+    if (!isDesktopOrLaptop()) {
+      console.warn('[WebMediaEngine] Full compilation is restricted to Desktop/Laptop devices.');
+      return;
+    }
+    const state = useAppStore.getState();
+    if (!state.currentBook) return;
+    state.setFullTranscribing(true);
+    state.currentBook.isCompileFullEnabled = true;
+    void Storage.saveBookMeta({
+      id: state.currentBook.id,
+      title: state.currentBook.title,
+      duration: state.currentBook.duration,
+      totalChunks: state.currentBook.chunks,
+      compiledChunks: Object.keys(state.transcripts).length,
+      lastPlayedTime: state.currentTime,
+      updatedAt: new Date().toISOString(),
+      audioFileName: state.currentBook.audioFileName,
+      textFileName: state.currentBook.textFileName,
+      syncOffsetMs: state.syncOffsetMs,
+      playbackRate: state.playbackRate,
+      dirHandle: state.currentBook.dirHandle,
+      coverUrl: state.currentBook.coverUrl,
+      isCompileFullEnabled: true,
+    });
+    if (state.currentBook.dirHandle) {
+      void saveManifestToFolder(state.currentBook.dirHandle, this._buildManifest(state.currentBook, state));
+    }
+    this._feedNextCompilationChunk();
+  }
+
+  stopFullTranscription(): void {
+    const state = useAppStore.getState();
+    state.setFullTranscribing(false);
+    state.setFullTranscribeETA(null);
+    if (state.currentBook) {
+      state.currentBook.isCompileFullEnabled = false;
+      void Storage.saveBookMeta({
+        id: state.currentBook.id,
+        title: state.currentBook.title,
+        duration: state.currentBook.duration,
+        totalChunks: state.currentBook.chunks,
+        compiledChunks: Object.keys(state.transcripts).length,
+        lastPlayedTime: state.currentTime,
+        updatedAt: new Date().toISOString(),
+        audioFileName: state.currentBook.audioFileName,
+        textFileName: state.currentBook.textFileName,
+        syncOffsetMs: state.syncOffsetMs,
+        playbackRate: state.playbackRate,
+        dirHandle: state.currentBook.dirHandle,
+        coverUrl: state.currentBook.coverUrl,
+        isCompileFullEnabled: false,
+      });
+      if (state.currentBook.dirHandle) {
+        void saveManifestToFolder(state.currentBook.dirHandle, this._buildManifest(state.currentBook, state));
+      }
+    }
+  }
+
+  private _feedNextCompilationChunk(): void {
+    const state = useAppStore.getState();
+    const book = state.currentBook;
+    if (!book || !state.isFullTranscribing) return;
+
+    // Scan for first untranscribed chunk
+    let nextChunk = -1;
+    for (let c = 0; c < book.chunks; c++) {
+      if (!state.transcripts[c] && !state.alignedChunks[c] && !this.processingChunks.has(c)) {
+        nextChunk = c;
+        break;
+      }
+    }
+
+    if (nextChunk !== -1) {
+      // Calculate ETA
+      const compiledCount = Object.keys(state.transcripts).length;
+      const remaining = Math.max(0, book.chunks - compiledCount);
+      if (this.recentChunkDurations.length > 0 && remaining > 0) {
+        const avgSec = this.recentChunkDurations.reduce((a, b) => a + b, 0) / this.recentChunkDurations.length;
+        const totalEstSec = Math.round(remaining * avgSec);
+        const mins = Math.floor(totalEstSec / 60);
+        const secs = totalEstSec % 60;
+        const eta = mins > 0 ? `~${mins}m ${secs}s` : `< 1m`;
+        state.setFullTranscribeETA(eta);
+      }
+      void this.ensureChunkProcessed(nextChunk);
+    } else if (this.processingChunks.size === 0) {
+      // 100% compilation complete!
+      state.setFullTranscribing(false);
+      state.setFullTranscribeETA(null);
+      if (book.dirHandle) {
+        void saveManifestToFolder(book.dirHandle, this._buildManifest(book, state));
+      }
     }
   }
 
@@ -189,6 +350,7 @@ export class WebMediaEngine implements IMediaEngine {
         cached.chunkIndex,
         cached.startTime,
         cached.endTime,
+        state.currentBook.chunks,
       );
       state.addAlignedChunk(chunkIndex, cached, aligned);
       return;
@@ -196,6 +358,7 @@ export class WebMediaEngine implements IMediaEngine {
 
     // ── Decode slice + send to worker (Memory-safe: ~1 MB per chunk) ───
     this.processingChunks.add(chunkIndex);
+    this.chunkStartTimes.set(chunkIndex, performance.now());
 
     if (!this.worker) {
       this._initWorker();
@@ -265,7 +428,12 @@ export class WebMediaEngine implements IMediaEngine {
     }
   }
 
-  async loadBook(audioFile: File, textFile: File): Promise<void> {
+  async loadBook(
+    audioFile: File,
+    textFile: File,
+    initialManifest?: SynkroManifest | null,
+    dirHandle?: FileSystemDirectoryHandle | null,
+  ): Promise<void> {
     const state = useAppStore.getState();
     state.setLoadingMessage('Initialising book…');
 
@@ -378,27 +546,84 @@ export class WebMediaEngine implements IMediaEngine {
     }
 
     // ── Text extraction ─────────────────────────────────────────────────
-    const textContent = await this._extractText(textFile);
+    const extracted = await this._extractText(textFile);
+    const textContent = extracted.text;
+    const coverUrl = initialManifest?.coverUrl || extracted.coverUrl;
 
     // ── Tokenise book text ──────────────────────────────────────────────
     state.setLoadingMessage('Tokenising book text…');
     const { bookWords, paragraphs } = tokenizeBookText(textContent);
     resetAlignmentCursor();
 
-    // ── Deterministic book ID ──────────────────────────────────────────
     const bookId = makeBookId(audioFile, textFile);
+    const totalChunks = Math.ceil(duration / this.CHUNK_DURATION);
 
     state.setBook({
       id: bookId,
-      title: audioFile.name.replace(/\.[^.]+$/, ''),
+      title: initialManifest?.title || audioFile.name.replace(/\.[^.]+$/, ''),
       audioUrl,
       textUrl,
       text: textContent,
       bookWords,
       paragraphs,
       duration,
-      chunks: Math.ceil(duration / this.CHUNK_DURATION),
+      chunks: totalChunks,
+      audioFileName: audioFile.name,
+      textFileName: textFile.name,
+      coverUrl,
+      totalPages: extracted.totalPages,
+      pageWordIndices: extracted.pageWordIndices,
+      isCompileFullEnabled: initialManifest?.isCompileFullEnabled ?? false,
+      dirHandle: dirHandle || undefined,
     });
+
+    // ── Hydrate pre-compiled transcripts from manifest (instant 100% resume) ──
+    if (initialManifest?.transcripts && Object.keys(initialManifest.transcripts).length > 0) {
+      await Storage.putAllTranscripts(bookId, initialManifest.transcripts);
+      for (const [cStr, tr] of Object.entries(initialManifest.transcripts)) {
+        const c = parseInt(cStr, 10);
+        const aligned = alignChunk(
+          bookWords,
+          tr.words,
+          tr.chunkIndex,
+          tr.startTime,
+          tr.endTime,
+          totalChunks,
+        );
+        state.addAlignedChunk(c, tr, aligned);
+      }
+    }
+
+    // ── Restore saved settings ──
+    if (initialManifest?.syncOffsetMs !== undefined) {
+      state.setSyncOffsetMs(initialManifest.syncOffsetMs);
+    }
+    if (initialManifest?.playbackRate !== undefined) {
+      state.setPlaybackRate(initialManifest.playbackRate);
+    }
+    if (initialManifest?.lastPlayedTime && initialManifest.lastPlayedTime > 0) {
+      state.setCurrentTime(initialManifest.lastPlayedTime);
+    }
+
+    // ── Persist book metadata to IndexedDB for Library Resume Hub ──
+    void Storage.saveBookMeta({
+      id: bookId,
+      title: initialManifest?.title || audioFile.name.replace(/\.[^.]+$/, ''),
+      duration,
+      totalChunks,
+      compiledChunks: Object.keys(useAppStore.getState().transcripts).length,
+      lastPlayedTime: initialManifest?.lastPlayedTime ?? 0,
+      updatedAt: new Date().toISOString(),
+      audioFileName: audioFile.name,
+      textFileName: textFile.name,
+      syncOffsetMs: initialManifest?.syncOffsetMs ?? 0,
+      playbackRate: initialManifest?.playbackRate ?? 1.0,
+      coverUrl,
+      isCompileFullEnabled: initialManifest?.isCompileFullEnabled ?? false,
+      dirHandle: dirHandle || undefined,
+    });
+
+    Storage.setLastActiveBookId(bookId);
 
     state.setLoadingMessage('');
 
@@ -406,6 +631,16 @@ export class WebMediaEngine implements IMediaEngine {
     void this.ensureChunkProcessed(0);
     void this.ensureChunkProcessed(1);
     void this.ensureChunkProcessed(2);
+
+    // ── Check if full compile should be resumed (laptop/desktop constraint) ──
+    const shouldResumeCompile =
+      (initialManifest?.isCompileFullEnabled || false) &&
+      isDesktopOrLaptop();
+    const transcribedCount = Object.keys(useAppStore.getState().transcripts).length;
+    if (shouldResumeCompile && transcribedCount < totalChunks) {
+      console.log('[WebMediaEngine] Automatically resuming full-book pre-transcription compilation...');
+      this.startFullTranscription();
+    }
   }
 
   dispose(): void {
@@ -482,23 +717,61 @@ export class WebMediaEngine implements IMediaEngine {
     return { audioData: resampled.getChannelData(0), bytesDiscarded };
   }
 
-  /** Extract plain text from TXT or PDF. */
-  private async _extractText(file: File): Promise<string> {
+  /** Extract plain text, cover art, and page map from TXT or PDF. */
+  private async _extractText(file: File): Promise<{
+    text: string;
+    coverUrl?: string;
+    totalPages: number;
+    pageWordIndices: number[];
+  }> {
     const { setLoadingMessage } = useAppStore.getState();
     if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
       setLoadingMessage('Parsing PDF…');
       const buf = await file.arrayBuffer();
       const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
       let out = '';
+      const pageWordIndices: number[] = [];
+      let currentWordCount = 0;
+
+      // Extract cover from page 1
+      let coverUrl: string | undefined = undefined;
+      try {
+        coverUrl = (await generatePdfCover(file)) || undefined;
+      } catch (err) {
+        console.warn('[WebMediaEngine] Could not generate cover:', err);
+      }
+
       for (let i = 1; i <= pdf.numPages; i++) {
         setLoadingMessage(`Extracting text (page ${i}/${pdf.numPages})…`);
+        pageWordIndices.push(currentWordCount);
         const page = await pdf.getPage(i);
         const content = await page.getTextContent();
-        out += content.items.map((it: Record<string, unknown>) => it['str'] as string).join(' ') + '\n';
+        const pageText = content.items.map((it: Record<string, unknown>) => it['str'] as string).join(' ') + '\n';
+        const pageWordLength = pageText.trim().split(/\s+/).filter(Boolean).length;
+        currentWordCount += pageWordLength;
+        out += pageText;
       }
-      return out;
+      return {
+        text: out,
+        coverUrl,
+        totalPages: Math.max(1, pdf.numPages),
+        pageWordIndices,
+      };
     }
+
     setLoadingMessage('Reading text file…');
-    return file.text();
+    const text = await file.text();
+    const totalWords = text.trim().split(/\s+/).filter(Boolean).length;
+    const estPages = Math.max(1, Math.ceil(totalWords / 300));
+    const pageWordIndices: number[] = [];
+    for (let p = 0; p < estPages; p++) {
+      pageWordIndices.push(p * 300);
+    }
+    return {
+      text,
+      coverUrl: undefined,
+      totalPages: estPages,
+      pageWordIndices,
+    };
   }
 }
